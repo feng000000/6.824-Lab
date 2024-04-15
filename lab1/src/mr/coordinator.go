@@ -9,6 +9,7 @@ import "io"
 import "time"
 import "strconv"
 import "sort"
+import "fmt"
 
 
 type taskPhase int
@@ -17,14 +18,14 @@ type task struct {
     id          int         // task unique ID
     filename    string      // param for mapTask
     content     string      // param for mapTask
-    key         string      // param for reduceTask (TODO: update when recude task is added)
-    values      []KeyValue  // param for reduceTask (TODO: update when recude task is added)
+    key         string      // param for reduceTask
+    values      []KeyValue  // param for reduceTask
 }
 
 type taskState struct {
     task
-    phase       taskPhase   // waiting for map(0) or waiting for reduce(1) or completed(2)
-    workerID    int         // the ID of the worker who get the task
+    phase       taskPhase
+    // workerID    int         // unnecessary
 }
 
 type worker struct {
@@ -59,20 +60,6 @@ const (
 
     timeoutSeconds int64 = 10
 )
-
-
-// Your code here -- RPC handlers for the worker to call.
-
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-    reply.Y = args.X + 1
-    return nil
-}
 
 
 // (change the identifer(PID) if workers are on differnt machine
@@ -118,7 +105,7 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
 
             if v, ok := c.taskStates[i]; ok {
                 v.phase     = mapping
-                v.workerID  = args.PID
+                // v.workerID  = args.PID
 
                 wker.task = v.task
                 reply.Task = v.task
@@ -142,7 +129,7 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
 
             if v, ok := c.taskStates[i]; ok {
                 v.phase     = reducing
-                v.workerID  = args.PID
+                // v.workerID  = args.PID
 
                 wker.task = v.task
                 reply.Task = v.task
@@ -188,23 +175,17 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
             sort.Sort(SortKey(c.intermediate))
             for i := 0; i < len(c.intermediate); i ++ {
                 taskID := ihash(c.intermediate[i].Key)
-                v := taskState{}
-                v.phase = waitingForReduce
-                v.task.id = taskID
-                v.task.key = c.intermediate[i].Key
-                j := i + 1
-                for j < len(c.intermediate) {
-                    // TODO
-                    if c.intermediate[j].Key == c.intermediate[i].Key {
-                        v.task.values = append(v.task.values, c.intermediate[j])
-                        j ++
-                    } else {
-                        break
-                    }
-                }
-                i = j - 1
 
-                newTaskStates[taskID] = v
+                ts := taskState{}
+                if v, ok := newTaskStates[taskID]; ok {
+                    ts = v
+                }
+                ts.phase = waitingForReduce
+                ts.task.id = taskID
+                ts.task.key = c.intermediate[i].Key
+                ts.task.values = append(ts.task.values, c.intermediate[i])
+
+                newTaskStates[taskID] = ts
             }
             c.taskStates = newTaskStates
         }
@@ -245,7 +226,12 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 //
 func (c *Coordinator) Done() bool {
 
-    // if c.done, write wordsCount into file
+    if c.done {
+        for k, v := range c.wordsCount {
+            ofile, _ := os.Create("mr-out-" + k)
+            fmt.Fprintf(ofile, "%v %v\n", k, v)
+        }
+    }
 
     return c.done
 }
@@ -268,29 +254,29 @@ func (c *Coordinator) server() {
 }
 
 
-// TODO
+// polling to check if worker timeout
 func (c *Coordinator) schedule() {
-    // polling to check if worker timeout
+    go func() {
+        for {
+            for wokerID, worker := range c.workers {
+                if time.Now().Unix() - worker.lastPing > timeoutSeconds {
+                    taskID := c.workers[wokerID].task.id
 
-    for {
-        for wokerID, worker := range c.workers {
-            if time.Now().Unix() - worker.lastPing > timeoutSeconds {
-                taskID := c.workers[wokerID].task.id
+                    value := c.taskStates[taskID]
+                    if value.phase == mapping {
+                        value.phase = waitingForMap
+                    } else if value.phase == reducing {
+                        value.phase = waitingForReduce
+                    }
+                    c.taskStates[taskID] = value
 
-                value := c.taskStates[taskID]
-                if value.phase == mapping {
-                    value.phase = waitingForMap
-                } else if value.phase == reducing {
-                    value.phase = waitingForReduce
+                    delete(c.workers, wokerID)
                 }
-                c.taskStates[taskID] = value
-
-                delete(c.workers, wokerID)
             }
-        }
 
-        time.Sleep(scheduleInterval)
-    }
+            time.Sleep(scheduleInterval)
+        }
+    }()
 }
 
 
@@ -299,12 +285,12 @@ func (c *Coordinator) schedule() {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
-func MakeCoordinator(files []string, _nReduce int) *Coordinator {
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
     c := Coordinator{}
 
-    c.nReduce = _nReduce
+    c.nReduce = nReduce
 
-    // init Coordinator
+    // add map task
     for i := 0; i < len(files); i ++ {
         // NOTE: rebuild read file part if run in real machine
         file, err := os.Open(files[i])
@@ -325,7 +311,6 @@ func MakeCoordinator(files []string, _nReduce int) *Coordinator {
             phase: waitingForMap,
         }
     }
-
 
     c.server()
     c.schedule()
