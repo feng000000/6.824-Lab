@@ -7,16 +7,18 @@ import "net/rpc"
 import "os"
 import "io"
 import "time"
+import "strconv"
+import "sort"
 
 
 type taskPhase int
 
 type task struct {
     id          int         // task unique ID
-    filename    string      // param for mapTask (update when task is added)
-    content     string      // param for mapTask (update when task is added)
-    key         string      // param for reduceTask (TODO: update when map is comleted)
-    values      []KeyValue  // param for reduceTask (TODO: update when map is comleted)
+    filename    string      // param for mapTask
+    content     string      // param for mapTask
+    key         string      // param for reduceTask (TODO: update when recude task is added)
+    values      []KeyValue  // param for reduceTask (TODO: update when recude task is added)
 }
 
 type taskState struct {
@@ -29,22 +31,22 @@ type worker struct {
     workerID    int
     alive       bool
     lastPing    int64
-    taskID      int
+    // taskID      int
+    task        task
 }
 
 type Coordinator struct {
+    nReduce         int
     workers         map[int]worker      // workerID -> worker/taskID
     taskStates      map[int]taskState   // taskID -> task/workerID
 
-    intermediate    []KeyValue      // results of map() (TODO: update in CompleteTask())
-    wordsCount      map[string]int  // results of reduce() (TODO: update in CompleteTask())
+    intermediate    []KeyValue          // results of map()
+    wordsCount      map[string]int      // results of reduce()
 
-    mapComplete     int     // number of map complete (TODO: update in CompleteTask())
-    reduceComplete  int     // number of reduce complete (TODO: update in CompleteTask())
-    done            bool    // true if all tasks completed (TODO: update in CompleteTask())
+    mapComplete     int                 // number of map complete
+    reduceComplete  int                 // number of reduce complete
+    done            bool                // true if all tasks completed
 }
-
-var nReduce int
 
 const (
     waitingForMap       taskPhase = 0
@@ -93,6 +95,7 @@ func (c *Coordinator) Ping(args *PingArgs, reply *PingReply) {
 
 func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
     if c.Done() {
+        reply.Flag = false
         return
     }
 
@@ -100,6 +103,7 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
     if v, ok := c.workers[args.PID]; ok {
         wker = v
     } else { // the worker has not ping once(not register)
+        reply.Flag = false
         return
     }
 
@@ -116,17 +120,21 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
                 v.phase     = mapping
                 v.workerID  = args.PID
 
-                wker.taskID = v.id
-                c.workers[args.PID] = wker
-                reply.task = v.task
+                wker.task = v.task
+                reply.Task = v.task
+                reply.Flag = true
 
+                c.workers[args.PID] = wker
                 c.taskStates[i] = v
+            } else {
+                reply.Flag = false
             }
             return
         }
 
     // try to get reduce task
     } else if c.reduceComplete < len(c.taskStates) {
+
         for i := 0; i < len(c.taskStates); i ++ {
             if c.taskStates[i].phase != waitingForReduce {
                 continue
@@ -136,11 +144,14 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
                 v.phase     = reducing
                 v.workerID  = args.PID
 
-                wker.taskID = v.id
-                c.workers[args.PID] = wker
-                reply.task = v.task
+                wker.task = v.task
+                reply.Task = v.task
+                reply.Flag = true
 
+                c.workers[args.PID] = wker
                 c.taskStates[i] = v
+            } else {
+                reply.Flag = false
             }
             return
         }
@@ -153,10 +164,78 @@ func (c *Coordinator) FetchTask(args *FetchTaskArgs, reply *FetchTaskReply) {
 
 
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) {
-    // TODO: check task phase:
-    //  map: update params of reduce task(task.key, task.values)
-    //       update c.intermediate, c.mapComplete
+    //  map: update c.intermediate, c.mapComplete
+    if args.Phase == mapping {
+        if v, ok := c.taskStates[args.Task.id]; !ok || v.phase != mapping {
+            reply.Flag = false
+            return
+        } else {
+            v.phase = waitingForReduce
+            c.taskStates[args.Task.id] = v
+        }
+
+        c.mapComplete ++
+        // TODO: write intermediate into file
+        c.intermediate = append(c.intermediate, args.MapResult)
+        if v, ok := c.workers[args.PID]; ok {
+            v.task = task{}
+            c.workers[args.PID] = v
+        }
+
+        // add nReduce reduce task(task.key, task.values)
+        if c.mapComplete == len(c.taskStates) {
+            newTaskStates := make(map[int]taskState)
+            sort.Sort(SortKey(c.intermediate))
+            for i := 0; i < len(c.intermediate); i ++ {
+                taskID := ihash(c.intermediate[i].Key)
+                v := taskState{}
+                v.phase = waitingForReduce
+                v.task.id = taskID
+                v.task.key = c.intermediate[i].Key
+                j := i + 1
+                for j < len(c.intermediate) {
+                    // TODO
+                    if c.intermediate[j].Key == c.intermediate[i].Key {
+                        v.task.values = append(v.task.values, c.intermediate[j])
+                        j ++
+                    } else {
+                        break
+                    }
+                }
+                i = j - 1
+
+                newTaskStates[taskID] = v
+            }
+            c.taskStates = newTaskStates
+        }
+
     //  reduce: update c.wordsCount && c.reduceComplete, check c.done
+    } else if args.Phase == reducing {
+        if v, ok := c.taskStates[args.Task.id]; !ok || v.phase != reducing {
+            reply.Flag = false
+            return
+        } else {
+            v.phase = completed
+            c.taskStates[args.Task.id] = v
+        }
+
+        c.reduceComplete ++
+        if v, ok := c.wordsCount[args.RecudeResult.Key]; ok {
+            add_v, err := strconv.Atoi(args.RecudeResult.Value)
+            if err != nil {
+                reply.Flag = false
+                return
+            }
+
+            v += add_v
+            c.wordsCount[args.RecudeResult.Key] = v
+        }
+        if c.reduceComplete == c.nReduce {
+            c.done = true
+        }
+    }
+
+    reply.Flag = true
 }
 
 
@@ -196,7 +275,7 @@ func (c *Coordinator) schedule() {
     for {
         for wokerID, worker := range c.workers {
             if time.Now().Unix() - worker.lastPing > timeoutSeconds {
-                taskID := c.workers[wokerID].taskID
+                taskID := c.workers[wokerID].task.id
 
                 value := c.taskStates[taskID]
                 if value.phase == mapping {
@@ -223,10 +302,10 @@ func (c *Coordinator) schedule() {
 func MakeCoordinator(files []string, _nReduce int) *Coordinator {
     c := Coordinator{}
 
-    nReduce = _nReduce
+    c.nReduce = _nReduce
 
     // init Coordinator
-    for i := 0; i < nReduce; i ++ {
+    for i := 0; i < len(files); i ++ {
         // NOTE: rebuild read file part if run in real machine
         file, err := os.Open(files[i])
         if err != nil {

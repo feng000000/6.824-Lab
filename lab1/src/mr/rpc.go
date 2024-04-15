@@ -29,16 +29,21 @@ type FetchTaskArgs struct {
 }
 
 type FetchTaskReply struct {
-    task task
+    Flag bool
+    Task task
 }
 
 type CompleteTaskArgs struct {
     PID int
-    task task
+    Task task
+    Phase taskPhase
+
+    MapResult KeyValue
+    RecudeResult KeyValue
 }
 
 type CompleteTaskReply struct {
-    flag bool
+    Flag bool
 }
 
 type PingArgs struct {

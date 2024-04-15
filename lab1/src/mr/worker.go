@@ -16,6 +16,15 @@ type KeyValue struct {
     Value string
 }
 
+// for sorting by key.
+type SortKey []KeyValue
+
+// for sorting by key.
+func (a SortKey) Len() int           { return len(a) }
+func (a SortKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a SortKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+
 
 //
 // use ihash(key) % NReduce to choose the reduce
