@@ -6,6 +6,7 @@ import "log"
 import "net/rpc"
 import "os"
 import "time"
+import "sort"
 
 
 //
@@ -25,7 +26,6 @@ func (a SortKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a SortKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 
-
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -37,19 +37,65 @@ func ihash(key string) int {
 }
 
 
-// TODO
 func workerSchudule(
     mapf func(string, string) []KeyValue,
     reducef func(string, []string) string,
 ) {
     for {
-        // TODO: get task
-        //       do task
+        println("try to fetch task.")
+
+        args := FetchTaskArgs{PID: os.Getpid()}
+        reply := FetchTaskReply{}
+
+        ok := call("Coordinator.FetchTask", &args, &reply)
+        if !ok {
+            continue
+        }
+
+        task := &reply.Task
+        completeArgs := CompleteTaskArgs{
+            PID: os.Getpid(),
+            Task: *task,
+        }
+        completeReply := CompleteTaskReply{}
 
 
+        if task.TaskType == "map" {
+            completeArgs.Phase = mapping
+            completeArgs.MapResult = mapf(task.Filename, task.Content)
 
+        } else if task.TaskType == "reduce" {
+            completeArgs.Phase = reducing
 
+            sort.Sort(SortKey(task.Values))
+            println("length:", len(task.Values))
+            for i := 0; i < len(task.Values); i ++{
+                var values []string
 
+                j := i
+                for j < len(task.Values) {
+                    // println("j:", j)
+                    if task.Values[j].Key != task.Values[i].Key {
+                        break
+                    }
+                    values = append(values, task.Values[j].Value)
+                    j ++
+                }
+
+                // println("append", i, "-", j)
+
+                res := KeyValue{
+                    Key: task.Values[i].Key,
+                    Value: reducef(task.Values[i].Key, values),
+                }
+                completeArgs.RecudeResult = append(completeArgs.RecudeResult, res)
+                i = j - 1
+            }
+        }
+
+        println("try to complete task.")
+
+        call("Coordinator.CompleteTask", &completeArgs, &completeReply)
 
         time.Sleep(scheduleInterval)
     }
@@ -69,51 +115,24 @@ func Worker(
     pid := os.Getpid()
     exitCh := make(chan struct{})
     go func() {
-        args := PingArgs{PID: pid}
-        reply := PingReply{}
-        ok := call("Coordinator.Ping", &args, &reply)
-        if !ok || !reply.Flag {
-            close(exitCh)
+        for {
+            args := PingArgs{PID: pid}
+            reply := PingReply{}
+            ok := call("Coordinator.Ping", &args, &reply)
+            if !ok {
+                close(exitCh)
+            }
+
+            time.Sleep(scheduleInterval)
         }
     }()
 
-    // do mapf or reducef
     go workerSchudule(mapf, reducef)
 
     // exitCh will blocking unless coordinator(master) is not alive
     <- exitCh
-
-
 }
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-    // declare an argument structure.
-    args := ExampleArgs{}
-
-    // fill in the argument(s).
-    args.X = 99
-
-    // declare a reply structure.
-    reply := ExampleReply{}
-
-    // send the RPC request, wait for the reply.
-    // the "Coordinator.Example" tells the
-    // receiving server that we'd like to call
-    // the Example() method of struct Coordinator.
-    ok := call("Coordinator.Example", &args, &reply)
-    if ok {
-        // reply.Y should be 100.
-        fmt.Printf("reply.Y %v\n", reply.Y)
-    } else {
-        fmt.Printf("call failed!\n")
-    }
-}
 
 //
 // send an RPC request to the coordinator, wait for the response.

@@ -29,7 +29,7 @@ type FetchTaskArgs struct {
 }
 
 type FetchTaskReply struct {
-    Flag bool
+    // Flag bool
     Task task
 }
 
@@ -38,12 +38,12 @@ type CompleteTaskArgs struct {
     Task task
     Phase taskPhase
 
-    MapResult KeyValue
-    RecudeResult KeyValue
+    MapResult []KeyValue
+    RecudeResult []KeyValue
 }
 
 type CompleteTaskReply struct {
-    Flag bool
+    // Flag bool
 }
 
 type PingArgs struct {
@@ -51,7 +51,7 @@ type PingArgs struct {
 }
 
 type PingReply struct {
-    Flag bool
+    // Flag bool
 }
 
 
